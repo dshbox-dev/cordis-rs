@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.3.23](https://github.com/dshbox/cordis-rs/compare/cordis-loader-v0.3.22...cordis-loader-v0.3.23) - 2026-09-26
+
+### Fixed
+
+- *(loader)* route rollback destructor diagnostics to logger
+- *(loader)* contain rollback member input destruction
+
 ## [0.3.14](https://github.com/dshbox/cordis-rs/compare/cordis-loader-v0.3.13...cordis-loader-v0.3.14) - 2026-09-25
 
 ### Fixed
