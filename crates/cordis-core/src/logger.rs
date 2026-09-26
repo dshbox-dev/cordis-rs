@@ -172,6 +172,9 @@ impl Logger {
             service: self.service.clone(),
         }
     }
+    pub(crate) fn for_fiber(&self, fiber_name: &str) -> Logger {
+        self.service.logger_for_fiber(fiber_name)
+    }
     /// This logger's channel name.
     pub fn name(&self) -> &str {
         &self.name

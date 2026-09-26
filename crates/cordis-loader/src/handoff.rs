@@ -5,15 +5,18 @@
 //! disposal obligation.
 
 use crate::outcome::{EntryOutcome, LoadOutcome};
+use cordis_core::logger::Logger;
 
 pub(crate) struct ResultHandoff {
     entries: Option<Vec<EntryOutcome>>,
+    logger: Logger,
 }
 
 impl ResultHandoff {
-    pub(crate) fn with_capacity(capacity: usize) -> Self {
+    pub(crate) fn with_capacity(capacity: usize, logger: Logger) -> Self {
         Self {
             entries: Some(Vec::with_capacity(capacity)),
+            logger,
         }
     }
 
@@ -47,17 +50,17 @@ impl Drop for ResultHandoff {
         let Some(entries) = self.entries.take() else {
             return;
         };
-        rollback(entries);
+        rollback(entries, self.logger.clone());
     }
 }
 
-fn rollback(entries: Vec<EntryOutcome>) {
+fn rollback(entries: Vec<EntryOutcome>, logger: Logger) {
     cordis_core::__internal::detach_completion(async move {
         for entry in entries.into_iter().rev() {
             let EntryOutcome::Spawned { fiber_handle, .. } = entry else {
                 continue;
             };
-            let _ = fiber_handle.dispose().await;
+            cordis_core::__internal::rollback_fiber(fiber_handle, &logger).await;
         }
     });
 }
