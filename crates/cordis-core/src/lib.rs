@@ -52,6 +52,7 @@ mod update;
 #[cfg(feature = "internal-api")]
 #[doc(hidden)]
 pub mod __internal {
+    use crate::logger::Logger;
     use crate::{Context, FiberHandle};
 
     /// Probe whether the selected Context generation currently admits cleanup.
@@ -72,9 +73,12 @@ pub mod __internal {
     /// Finish one Loader rollback member, containing its potentially-last
     /// Plugin input destructor after the terminal barrier. A panicking Drop
     /// cannot prevent the Loader from attempting its remaining members.
-    pub async fn rollback_fiber(handle: FiberHandle) {
+    pub async fn rollback_fiber(handle: FiberHandle, runtime_logger: &Logger) {
+        let logger = runtime_logger.for_fiber(handle.name());
         let _ = handle.dispose().await;
-        crate::contained::contain("Loader rollback member destruction", None, || drop(handle));
+        crate::contained::contain("Loader rollback member destruction", Some(&logger), || {
+            drop(handle)
+        });
     }
 }
 

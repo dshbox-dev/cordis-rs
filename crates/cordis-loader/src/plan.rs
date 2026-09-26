@@ -418,7 +418,7 @@ impl LoadPlan {
         use crate::handoff::ResultHandoff;
         use crate::outcome::{EntryOutcome, LoaderFailure};
 
-        let mut handoff = ResultHandoff::with_capacity(self.inner.nodes.len());
+        let mut handoff = ResultHandoff::with_capacity(self.inner.nodes.len(), ctx.logger());
         let mut disabled_by_entry = HashMap::<EntryId, EntryId>::new();
         let mut realms = RealmEnvironment::new();
 

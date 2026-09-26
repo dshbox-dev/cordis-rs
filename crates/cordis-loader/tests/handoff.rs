@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use cordis_core::logger::{BufferExporter, Level};
 use cordis_core::{Context, Plugin, PreparedPlugin};
 use cordis_loader::outcome::{EntryOutcome, LoaderFailure};
 use cordis_loader::plan::{LoadPlan, LoadPlanBuilder, PluginEntry};
@@ -341,6 +342,8 @@ async fn abandonment_rolls_back_reverse_success_order_attempt_all_across_cleanup
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn abandonment_continues_after_last_input_drop_panics_between_members() {
     let ctx = Context::new();
+    let buffer = Arc::new(BufferExporter::new(8, Level::Warn).unwrap());
+    let _exporter = ctx.add_exporter(buffer.clone()).unwrap();
     let order = Arc::new(AtomicUsize::new(0));
     let first = CleanupProbe::new(CleanupMode::Ok, order.clone());
     let second = CleanupProbe::new(CleanupMode::Ok, order);
@@ -401,6 +404,18 @@ async fn abandonment_continues_after_last_input_drop_panics_between_members() {
     );
     wait_for_root_only(&ctx).await;
     assert_eq!(input_drops.load(Ordering::SeqCst), 1);
+    let reports = buffer.snapshot();
+    assert_eq!(
+        reports.len(),
+        1,
+        "one contained destructor report reaches the exporter"
+    );
+    assert_eq!(reports[0].level(), Level::Warn);
+    assert_eq!(reports[0].channel(), "handoff::-panic-input-plugin");
+    assert_eq!(
+        reports[0].text(),
+        "cordis: Loader rollback member destruction panicked: last input reference dropped during loader rollback"
+    );
 }
 
 #[tokio::test]
