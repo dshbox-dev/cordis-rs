@@ -57,7 +57,7 @@ fn rollback(entries: Vec<EntryOutcome>) {
             let EntryOutcome::Spawned { fiber_handle, .. } = entry else {
                 continue;
             };
-            let _ = fiber_handle.dispose().await;
+            cordis_core::__internal::rollback_fiber(fiber_handle).await;
         }
     });
 }
