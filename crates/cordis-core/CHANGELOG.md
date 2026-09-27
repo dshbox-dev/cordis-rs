@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.3.25](https://github.com/dshbox/cordis-rs/compare/cordis-core-v0.3.24...cordis-core-v0.3.25) - 2026-09-27
+
+### Fixed
+
+- *(core)* contain uncalled waterfall tail destruction
+
+### Other
+
+- *(core)* clarify preflight tail ownership and non-invocation
+
 ## [0.3.24](https://github.com/dshbox/cordis-rs/compare/cordis-core-v0.3.23...cordis-core-v0.3.24) - 2026-09-27
 
 ### Other
