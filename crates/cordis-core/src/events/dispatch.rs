@@ -78,15 +78,18 @@ fn drop_unclaimed_hooks(logger: &crate::logger::Logger, hooks: impl IntoIterator
 }
 
 #[derive(Default)]
-struct UncalledWaterfallDrops(Mutex<Option<Vec<String>>>);
+struct UncalledWaterfallDiagnostics(Mutex<Option<Vec<String>>>);
 
-impl UncalledWaterfallDrops {
+impl UncalledWaterfallDiagnostics {
     fn begin(&self) {
         *self.0.lock() = Some(Vec::new());
     }
 
     fn finish(&self) -> Vec<String> {
-        self.0.lock().take().expect("uncalled chain drain started")
+        self.0
+            .lock()
+            .take()
+            .expect("uncalled waterfall diagnostics collection started")
     }
 }
 
@@ -96,7 +99,7 @@ impl UncalledWaterfallDrops {
 // ordinary Drop behavior.
 struct WaterfallHook {
     hook: Option<HookSnap>,
-    uncalled: Arc<UncalledWaterfallDrops>,
+    uncalled: Arc<UncalledWaterfallDiagnostics>,
 }
 
 impl WaterfallHook {
@@ -112,12 +115,14 @@ impl Drop for WaterfallHook {
         };
         if self.uncalled.0.lock().is_some() {
             if let Err(panic) = std::panic::catch_unwind(AssertUnwindSafe(|| drop(hook))) {
+                // Consuming a user panic payload can run its destructor.
+                let diagnostic = panic_message(panic);
                 self.uncalled
                     .0
                     .lock()
                     .as_mut()
-                    .expect("uncalled chain drain remains active")
-                    .push(panic_message(panic));
+                    .expect("uncalled waterfall diagnostics collection remains active")
+                    .push(diagnostic);
             }
         } else {
             drop(hook);
@@ -468,7 +473,7 @@ impl Context {
             })
         }));
 
-        let uncalled = Arc::new(UncalledWaterfallDrops::default());
+        let uncalled = Arc::new(UncalledWaterfallDiagnostics::default());
         let mut next = tail;
         for hook in hooks.into_iter().rev() {
             let downstream = next;
@@ -506,17 +511,15 @@ impl Context {
                                             drop(downstream)
                                         }))
                                         .err();
-                                    for diagnostic in uncalled.finish() {
+                                    for diagnostic in uncalled
+                                        .finish()
+                                        .into_iter()
+                                        .chain(tail_panic.map(panic_message))
+                                    {
                                         failure.diagnostic.push_str(
                                             "; uncalled waterfall continuation destruction panicked: ",
                                         );
                                         failure.diagnostic.push_str(&diagnostic);
-                                    }
-                                    if let Some(panic) = tail_panic {
-                                        failure.diagnostic.push_str(
-                                            "; uncalled waterfall continuation destruction panicked: ",
-                                        );
-                                        failure.diagnostic.push_str(&panic_message(panic));
                                     }
                                     Err(failure)
                                 }

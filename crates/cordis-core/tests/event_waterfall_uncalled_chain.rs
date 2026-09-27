@@ -4,7 +4,7 @@ use cordis_core::event::{
     DispatchError, DispatchOutcomeKind, EventOperation, InvocationFailureKind, ListenerOptions,
     mapper_sync, observer_sync,
 };
-use cordis_core::observation::RuntimeObservation;
+use cordis_core::observation::{ListenerChange, RuntimeObservation};
 use cordis_core::{Context, Event, Routing};
 use parking_lot::Mutex;
 use std::convert::Infallible;
@@ -32,7 +32,17 @@ impl Drop for PanicOnDrop {
 async fn check_public_dispatch() {
     let ctx = Context::new();
     let (completion_tx, mut completion_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (registration_tx, mut registration_rx) = tokio::sync::mpsc::unbounded_channel();
     ctx.observe_runtime(observer_sync(move |_, record: RuntimeObservation| {
+        if let RuntimeObservation::ListenerRegistration {
+            change: ListenerChange::Registered,
+            event: Flow::NAME,
+            listener,
+            ..
+        } = &record
+        {
+            registration_tx.send(listener.clone()).unwrap();
+        }
         if let RuntimeObservation::DispatchCompleted {
             operation: EventOperation::Waterfall,
             event: Flow::NAME,
@@ -61,6 +71,16 @@ async fn check_public_dispatch() {
             .unwrap(),
         );
     }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        for _ in 0..2 {
+            registration_rx
+                .recv()
+                .await
+                .expect("B/C registration observed");
+        }
+    })
+    .await
+    .expect("B/C registration observations were not published");
     let controls = Arc::new(Mutex::new(registrations));
     let removed = controls.clone();
     let retained = drops.clone();
@@ -75,6 +95,10 @@ async fn check_public_dispatch() {
         ListenerOptions::default().prepend(),
     )
     .unwrap();
+    let a_id = tokio::time::timeout(Duration::from_secs(2), registration_rx.recv())
+        .await
+        .expect("A registration observation was not published")
+        .expect("A registration observed");
 
     let tail_hits = Arc::new(AtomicUsize::new(0));
     let hits = tail_hits.clone();
@@ -88,7 +112,7 @@ async fn check_public_dispatch() {
         panic!("expected the original Mapper failure");
     };
     assert_eq!(failure.kind(), InvocationFailureKind::ReturnedError);
-    assert!(failure.registration_id().is_some());
+    assert_eq!(failure.registration_id(), Some(&a_id));
     assert!(failure.diagnostic().starts_with("A error; "));
     assert!(failure.diagnostic().contains("B destructor"));
     assert!(failure.diagnostic().contains("C destructor"));
