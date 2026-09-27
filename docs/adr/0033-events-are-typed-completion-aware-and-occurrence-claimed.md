@@ -104,7 +104,15 @@ are contained at invocation and normalized exactly once into an opaque
 and the exact registration id when applicable — by the last adapter that
 knows the concrete error type; the original object, `Any`, and downcast
 never escape, and panic containment covers future polling and state
-factories. What happens next follows the active primitive's
+factories. After a claimed invocation runs to completion, destruction of
+its final callback reference is also contained and correlated with that
+occurrence. A destructor panic fails the invocation even if the callback
+returned a value; that undeliverable value is discarded under its own
+unwind boundary. When the invocation already failed, its earlier failure
+remains primary and the destructor diagnostic is appended. Cancellation
+can instead destroy a pending invocation's callback while dropping the
+operation future, without producing an `InvocationFailure`. What happens
+next follows the active primitive's
 fail-first, attempt-all, or onion rule.
 
 ## Rationale

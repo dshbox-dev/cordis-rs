@@ -171,12 +171,57 @@ impl Context {
         callback: ErasedListener,
         payload: ErasedPayload,
     ) -> Result<CallbackValue, InvocationFailure> {
-        let future = std::panic::catch_unwind(AssertUnwindSafe(|| callback(payload)))
-            .map_err(|panic| InvocationFailure::panic(panic_message(panic)))?;
-        AssertUnwindSafe(future)
-            .catch_unwind()
-            .await
-            .map_err(|panic| InvocationFailure::panic(panic_message(panic)))?
+        Self::invoke_and_drop_callback(callback, |callback| callback(payload)).await
+    }
+
+    async fn invoke_and_drop_callback<C, F, V>(
+        callback: C,
+        construct: impl FnOnce(&C) -> F,
+    ) -> Result<V, InvocationFailure>
+    where
+        F: Future<Output = Result<V, InvocationFailure>>,
+    {
+        let outcome = match std::panic::catch_unwind(AssertUnwindSafe(|| construct(&callback))) {
+            Ok(future) => AssertUnwindSafe(future)
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|panic| Err(InvocationFailure::panic(panic_message(panic)))),
+            Err(panic) => Err(InvocationFailure::panic(panic_message(panic))),
+        };
+        Self::drop_callback_contained(callback, outcome)
+    }
+
+    fn drop_callback_contained<T, V>(
+        callback: T,
+        outcome: Result<V, InvocationFailure>,
+    ) -> Result<V, InvocationFailure> {
+        match std::panic::catch_unwind(AssertUnwindSafe(|| drop(callback))) {
+            Ok(()) => outcome,
+            Err(panic) => {
+                let mut diagnostic = panic_message(panic);
+                match outcome {
+                    Ok(value) => {
+                        // Callback destruction has already failed this invocation.
+                        // Its successful output cannot be delivered; discard a
+                        // user-owned value under a separate unwind boundary.
+                        if let Err(secondary) =
+                            std::panic::catch_unwind(AssertUnwindSafe(|| drop(value)))
+                        {
+                            diagnostic.push_str("; listener output destruction panicked: ");
+                            diagnostic.push_str(&panic_message(secondary));
+                        }
+                        Err(InvocationFailure::panic(diagnostic))
+                    }
+                    Err(mut failure) => {
+                        failure
+                            .diagnostic
+                            .push_str("; listener destruction panicked: ");
+                        failure.diagnostic.push_str(&diagnostic);
+                        Err(failure)
+                    }
+                }
+            }
+        }
     }
 
     async fn invoke_listener(
@@ -194,12 +239,7 @@ impl Context {
         payload: ErasedPayload,
         next: NextFn,
     ) -> Result<ErasedPayload, InvocationFailure> {
-        let future = std::panic::catch_unwind(AssertUnwindSafe(|| callback(payload, next)))
-            .map_err(|panic| InvocationFailure::panic(panic_message(panic)))?;
-        AssertUnwindSafe(future)
-            .catch_unwind()
-            .await
-            .map_err(|panic| InvocationFailure::panic(panic_message(panic)))?
+        Self::invoke_and_drop_callback(callback, |callback| callback(payload, next)).await
     }
 
     /// Deliver an ordered notification using explicit routing.

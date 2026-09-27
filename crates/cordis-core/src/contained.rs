@@ -11,7 +11,10 @@
 //! helpers for framework-owned work with no caller. Operation-specific adapters
 //! such as Event dispatch and update control also contain user callbacks locally
 //! when they must cover both synchronous callback construction and asynchronous
-//! polling in one semantic boundary. Two reusable policies live here:
+//! polling in one semantic boundary. Event dispatch also contains destruction
+//! of a claimed callback after its invocation completes; dropping a pending
+//! operation future is a separate caller-owned cancellation path. Two reusable
+//! policies live here:
 //!
 //! - [`contain_join`] recovers a panicked task through its join handle and
 //!   reports it while allowing the drain to continue;
