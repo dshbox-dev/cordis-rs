@@ -684,6 +684,15 @@ operation while its callback is pending drops the operation future
 instead of producing an `InvocationFailure`; this completed-invocation
 boundary does not govern destruction during cancellation or removal of
 an unclaimed registration.
+During an awaited `emit` or `query`, an earlier callback can remove a later
+unclaimed listener while its snapshot is still held by the operation. If
+dispatch then fails, answers early, or skips that removed occurrence, the
+operation releases each unclaimed snapshot under containment. A panicking
+capture destructor is reported through the Runtime logger; it cannot replace
+the original failure or answer, or suppress `DispatchCompleted`. An awaited
+`emit_parallel` or `waterfall` also contains destruction of a snapshot whose
+invocation claim loses to removal, so later claimed work or the waterfall tail
+can still complete.
 For an awaited `waterfall`, a preflight error can leave the caller's tail
 unused, and a Mapper error can leave its downstream `Next` chain uncalled.
 Destruction of those operation-owned values cannot replace the primary

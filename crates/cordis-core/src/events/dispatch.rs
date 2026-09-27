@@ -66,6 +66,16 @@ fn claim_hook(root: &Root, event: &'static str, hook: &HookSnap) -> bool {
     claimed
 }
 
+fn drop_unclaimed_hooks(logger: &crate::logger::Logger, hooks: impl IntoIterator<Item = HookSnap>) {
+    for hook in hooks {
+        crate::contained::contain(
+            "unclaimed event listener snapshot destruction",
+            Some(logger),
+            || drop(hook),
+        );
+    }
+}
+
 impl Context {
     fn register_listener<E, L>(
         &self,
@@ -248,18 +258,25 @@ impl Context {
         E: Event,
         E::Args: Clone,
     {
-        let hooks = self.preflight::<E>(&routing, EventOperation::Emit)?;
-        for hook in hooks {
+        let mut hooks = self
+            .preflight::<E>(&routing, EventOperation::Emit)?
+            .into_iter();
+        let logger = self.logger();
+        while let Some(hook) = hooks.next() {
             if !claim_hook(&self.root, E::NAME, &hook) {
+                drop_unclaimed_hooks(&logger, std::iter::once(hook));
                 continue;
             }
             let registration = hook.id;
             let HookKind::Plain { callback, .. } = hook.kind else {
                 unreachable!("preflight excludes Around from emit")
             };
-            Self::invoke_listener(callback, Box::new(args.clone()), registration)
-                .await
-                .map_err(DispatchError::Invocation)?;
+            if let Err(failure) =
+                Self::invoke_listener(callback, Box::new(args.clone()), registration).await
+            {
+                drop_unclaimed_hooks(&logger, hooks);
+                return Err(DispatchError::Invocation(failure));
+            }
         }
         Ok(())
     }
@@ -275,10 +292,15 @@ impl Context {
         E::Args: Clone,
     {
         let hooks = self.preflight::<E>(&routing, EventOperation::EmitParallel)?;
-        let claimed = hooks
-            .into_iter()
-            .filter(|hook| claim_hook(&self.root, E::NAME, hook))
-            .collect::<Vec<_>>();
+        let logger = self.logger();
+        let mut claimed = Vec::new();
+        for hook in hooks {
+            if claim_hook(&self.root, E::NAME, &hook) {
+                claimed.push(hook);
+            } else {
+                drop_unclaimed_hooks(&logger, std::iter::once(hook));
+            }
+        }
 
         let invocations = claimed.into_iter().map(|hook| {
             let registration = hook.id;
@@ -309,18 +331,27 @@ impl Context {
         E: Event,
         E::Args: Clone,
     {
-        let hooks = self.preflight::<E>(&routing, EventOperation::Query)?;
-        for hook in hooks {
+        let mut hooks = self
+            .preflight::<E>(&routing, EventOperation::Query)?
+            .into_iter();
+        let logger = self.logger();
+        while let Some(hook) = hooks.next() {
             if !claim_hook(&self.root, E::NAME, &hook) {
+                drop_unclaimed_hooks(&logger, std::iter::once(hook));
                 continue;
             }
             let registration = hook.id;
             let HookKind::Plain { callback, role } = hook.kind else {
                 unreachable!("preflight excludes Around from query")
             };
-            let value = Self::invoke_listener(callback, Box::new(args.clone()), registration)
-                .await
-                .map_err(DispatchError::Invocation)?;
+            let value =
+                match Self::invoke_listener(callback, Box::new(args.clone()), registration).await {
+                    Ok(value) => value,
+                    Err(failure) => {
+                        drop_unclaimed_hooks(&logger, hooks);
+                        return Err(DispatchError::Invocation(failure));
+                    }
+                };
             match (role, value) {
                 (super::ListenerRole::Observer, CallbackValue::Observer) => {}
                 (super::ListenerRole::Responder, CallbackValue::Responder(None)) => {}
@@ -328,6 +359,7 @@ impl Context {
                     let output = *output
                         .downcast::<E::Output>()
                         .expect("Event contract guarantees Responder output type");
+                    drop_unclaimed_hooks(&logger, hooks);
                     return Ok(QueryOutcome::Answer(output));
                 }
                 _ => unreachable!("semantic adapter role determines callback value"),
@@ -391,9 +423,11 @@ impl Context {
         for hook in hooks.into_iter().rev() {
             let downstream = next;
             let root = self.root.clone();
+            let logger = self.logger();
             next = NextFn(Box::new(move |payload| {
                 Box::pin(async move {
                     if !claim_hook(&root, E::NAME, &hook) {
+                        drop_unclaimed_hooks(&logger, std::iter::once(hook));
                         return downstream.call(payload).await;
                     }
                     let registration = hook.id.clone();
