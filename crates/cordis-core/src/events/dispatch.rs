@@ -352,8 +352,8 @@ impl Context {
         let hooks = match self.preflight::<E>(&routing, EventOperation::Waterfall) {
             Ok(hooks) => hooks,
             Err(failure) => {
-                // Preflight owns the caller's tail even when no invocation
-                // can start. Keep the phase error and completion observation.
+                // The operation still owns the caller's tail if preflight
+                // fails. Keep the phase error and completion observation.
                 let logger = self.logger();
                 crate::contained::contain(
                     "uncalled waterfall tail destruction",

@@ -206,12 +206,15 @@ async fn preflight_failure_survives_unused_tail_destructor_and_publishes_complet
         .unwrap();
 
     let drops = Arc::new(AtomicUsize::new(0));
+    let tail_hits = Arc::new(AtomicUsize::new(0));
     let capture = PanicOnTailDrop(drops.clone());
+    let observed_tail_hits = tail_hits.clone();
     let dispatch = AssertUnwindSafe(ctx.waterfall::<Flow, _, _, Infallible>(
         Routing::Unscoped,
         "x".into(),
         move |value| {
             let _ = &capture;
+            observed_tail_hits.fetch_add(1, Ordering::SeqCst);
             async move { Ok(value) }
         },
     ))
@@ -229,6 +232,7 @@ async fn preflight_failure_survives_unused_tail_destructor_and_publishes_complet
         })
     ));
     assert_eq!(drops.load(Ordering::SeqCst), 1);
+    assert_eq!(tail_hits.load(Ordering::SeqCst), 0);
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(2), completion_rx.recv())
             .await
