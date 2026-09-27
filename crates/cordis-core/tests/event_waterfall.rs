@@ -1,14 +1,18 @@
 //! Issue 34 contract: owned waterfall and derived waterfall_query.
 
 use cordis_core::event::{
-    DispatchError, InvocationFailureKind, ListenerOptions, Next, around, mapper_sync,
-    responder_sync,
+    DispatchError, DispatchOutcomeKind, EventOperation, InvocationFailureKind, ListenerOptions,
+    Next, around, mapper_sync, observer_sync, responder_sync,
 };
-use cordis_core::{Context, Event, QueryOutcome, Routing};
+use cordis_core::observation::RuntimeObservation;
+use cordis_core::{Context, Event, Level, QueryOutcome, Routing, logger::BufferExporter};
+use futures::FutureExt;
 use std::convert::Infallible;
 use std::io;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 struct Flow;
 impl Event for Flow {
@@ -22,6 +26,35 @@ impl Event for Route {
     const NAME: &'static str = "issue34/route";
     type Args = String;
     type Output = String;
+}
+
+struct PanicOnTailDrop(Arc<AtomicUsize>);
+
+impl Drop for PanicOnTailDrop {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        panic!("uncalled tail capture dropped");
+    }
+}
+
+fn waterfall_completions(
+    ctx: &Context,
+) -> tokio::sync::mpsc::UnboundedReceiver<DispatchOutcomeKind> {
+    let (completion_tx, completion_rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.observe_runtime(observer_sync(move |_, record: RuntimeObservation| {
+        if let RuntimeObservation::DispatchCompleted {
+            operation: EventOperation::Waterfall,
+            event: Flow::NAME,
+            outcome,
+            ..
+        } = record
+        {
+            completion_tx.send(outcome).unwrap();
+        }
+        Ok::<(), Infallible>(())
+    }))
+    .unwrap();
+    completion_rx
 }
 
 #[tokio::test]
@@ -112,6 +145,103 @@ async fn waterfall_correlates_listener_failure_but_framework_tail_has_no_registr
     };
     assert_eq!(tail_failure.diagnostic(), "tail");
     assert!(tail_failure.registration_id().is_none());
+}
+
+#[tokio::test]
+async fn mapper_failure_survives_uncalled_tail_destructor_and_publishes_completion() {
+    let ctx = Context::new();
+    let mut completion_rx = waterfall_completions(&ctx);
+    ctx.on::<Flow, _>(mapper_sync(|_, _: String| {
+        Err::<String, _>(io::Error::other("mapper-original"))
+    }))
+    .unwrap();
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let tail_hits = Arc::new(AtomicUsize::new(0));
+    let capture = PanicOnTailDrop(drops.clone());
+    let hits = tail_hits.clone();
+    let dispatch = AssertUnwindSafe(ctx.waterfall::<Flow, _, _, Infallible>(
+        Routing::Unscoped,
+        "x".into(),
+        move |value| {
+            let _ = &capture;
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                Ok(value)
+            }
+        },
+    ))
+    .catch_unwind()
+    .await;
+    assert!(
+        dispatch.is_ok(),
+        "uncalled tail Drop replaced mapper failure"
+    );
+    let Err(DispatchError::Invocation(failure)) = dispatch.unwrap() else {
+        panic!("the mapper's returned error must remain the primary failure");
+    };
+    assert_eq!(failure.kind(), InvocationFailureKind::ReturnedError);
+    assert_eq!(
+        failure.diagnostic(),
+        "mapper-original; uncalled waterfall continuation destruction panicked: uncalled tail capture dropped"
+    );
+    assert!(failure.registration_id().is_some());
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    assert_eq!(tail_hits.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), completion_rx.recv())
+            .await
+            .expect("failed waterfall completion was not published"),
+        Some(DispatchOutcomeKind::Failed)
+    );
+}
+
+#[tokio::test]
+async fn preflight_failure_survives_unused_tail_destructor_and_publishes_completion() {
+    let ctx = Context::new();
+    let reports = Arc::new(BufferExporter::new(4, Level::Warn).unwrap());
+    let _exporter = ctx.add_exporter(reports.clone()).unwrap();
+    let mut completion_rx = waterfall_completions(&ctx);
+    ctx.on::<Flow, _>(responder_sync(|_, value| Ok::<_, Infallible>(Some(value))))
+        .unwrap();
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let capture = PanicOnTailDrop(drops.clone());
+    let dispatch = AssertUnwindSafe(ctx.waterfall::<Flow, _, _, Infallible>(
+        Routing::Unscoped,
+        "x".into(),
+        move |value| {
+            let _ = &capture;
+            async move { Ok(value) }
+        },
+    ))
+    .catch_unwind()
+    .await;
+    assert!(
+        dispatch.is_ok(),
+        "unused tail Drop replaced preflight failure"
+    );
+    assert!(matches!(
+        dispatch.unwrap(),
+        Err(DispatchError::IncompatibleRole {
+            operation: EventOperation::Waterfall,
+            role: cordis_core::event::ListenerRole::Responder,
+        })
+    ));
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), completion_rx.recv())
+            .await
+            .expect("failed waterfall completion was not published"),
+        Some(DispatchOutcomeKind::Failed)
+    );
+    let reports = reports.snapshot();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].level(), Level::Warn);
+    assert_eq!(
+        reports[0].text(),
+        "cordis: uncalled waterfall tail destruction panicked: uncalled tail capture dropped"
+    );
 }
 
 #[tokio::test]
