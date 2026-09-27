@@ -111,7 +111,8 @@ pub enum DispatchOutcomeKind {
 pub enum InvocationFailureKind {
     /// The user callback or tail returned an error.
     ReturnedError,
-    /// A state factory, callback, or awaited callback future panicked.
+    /// A state factory, callback, awaited future, or final callback destructor
+    /// panicked, unless an earlier returned error remains primary.
     Panic,
 }
 

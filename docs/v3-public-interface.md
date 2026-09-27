@@ -672,9 +672,21 @@ Callback error types require only `std::error::Error`. The last adapter
 that knows the concrete error normalizes it exactly once to owned
 Runtime-safe diagnostics; the original object, type identity, `Any`, and
 downcast never escape. Panic containment includes future polling and
-`with_state` factories. There are no public shape or payload mismatch
-errors; contract and role failures are the semantic variants above, and
-remaining representation checks are private invariants.
+`with_state` factories. A once listener's last callback reference may be
+destroyed after its claim removes the stored occurrence. For an invocation
+polled to completion, a panic in that callback destructor is a correlated
+`Panic` failure; `emit_parallel` still awaits its other claimed listeners.
+The callback's returned answer or mapped value is discarded when its
+destructor panics. If that value also panics during destruction, both
+destructor diagnostics are contained. An earlier invocation failure keeps
+its original kind and adds the destructor diagnostic. Cancelling an
+operation while its callback is pending drops the operation future
+instead of producing an `InvocationFailure`; this completed-invocation
+boundary does not govern destruction during cancellation or removal of
+an unclaimed registration.
+There are no public shape or payload mismatch errors; contract and role
+failures are the semantic variants above, and remaining representation
+checks are private invariants.
 
 ## Effects and tasks
 

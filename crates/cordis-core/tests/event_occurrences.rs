@@ -29,6 +29,13 @@ impl Event for Flow {
     type Output = usize;
 }
 
+struct DropAnswer;
+impl Event for DropAnswer {
+    const NAME: &'static str = "issue32/drop-answer";
+    type Args = ();
+    type Output = PanicOnLastCaptureDrop;
+}
+
 #[tokio::test]
 async fn duplicate_occurrences_are_independent_and_registration_drop_is_inert() {
     let ctx = Context::new();
@@ -263,6 +270,44 @@ async fn once_around_capture_destruction_is_correlated_invocation_failure() {
         .unwrap(),
         3
     );
+}
+
+#[tokio::test]
+async fn callback_drop_panic_discards_an_answer_even_if_its_drop_also_panics() {
+    let ctx = Context::new();
+    let callback_drops = Arc::new(AtomicUsize::new(0));
+    let answer_drops = Arc::new(AtomicUsize::new(0));
+    let capture = PanicOnLastCaptureDrop(callback_drops.clone());
+    let answer_drops_for_callback = answer_drops.clone();
+    let registration = ctx
+        .on_with::<DropAnswer, _>(
+            responder_sync(move |_, ()| {
+                let _ = &capture;
+                Ok::<_, Infallible>(Some(PanicOnLastCaptureDrop(
+                    answer_drops_for_callback.clone(),
+                )))
+            }),
+            ListenerOptions::default().once(),
+        )
+        .unwrap();
+
+    let dispatch = AssertUnwindSafe(ctx.query::<DropAnswer>(Routing::Unscoped, ()))
+        .catch_unwind()
+        .await;
+    assert!(dispatch.is_ok(), "answer Drop escaped dispatch containment");
+    let Err(DispatchError::Invocation(failure)) = dispatch.unwrap() else {
+        panic!("a callback destructor panic cannot deliver its answer");
+    };
+    assert_eq!(failure.kind(), InvocationFailureKind::Panic);
+    assert!(failure.registration_id().is_some());
+    assert!(
+        failure
+            .diagnostic()
+            .contains("listener output destruction panicked")
+    );
+    assert_eq!(callback_drops.load(Ordering::SeqCst), 1);
+    assert_eq!(answer_drops.load(Ordering::SeqCst), 1);
+    assert!(!registration.remove());
 }
 
 #[tokio::test]
