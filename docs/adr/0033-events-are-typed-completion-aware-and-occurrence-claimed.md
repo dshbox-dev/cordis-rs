@@ -46,6 +46,13 @@ the tail by not consuming its consuming, single-use `Next<E>`; consuming
 returned error or contained panic propagates outward through the Around
 layers, where an outer Around may replace or recover it; failure never
 rolls back earlier user effects or already committed framework state.
+An unused tail remains operation-owned on preflight failure, and an
+uncalled continuation remains operation-owned when a Mapper fails. Their
+destructors cannot replace the primary failure or prevent the
+`DispatchCompleted` record. Preflight reports a tail destructor panic
+through the Runtime logger; a Mapper failure retains its kind and
+registration identity while appending a continuation destructor panic
+to its diagnostic.
 
 Listener roles are semantic protocol input, not closure shapes.
 `Listener<E>` is sealed and methodless, and the registration/storage

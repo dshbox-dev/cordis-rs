@@ -349,7 +349,20 @@ impl Context {
         Fut: Future<Output = Result<E::Output, Err>> + Send + 'static,
         Err: Error + 'static,
     {
-        let hooks = self.preflight::<E>(&routing, EventOperation::Waterfall)?;
+        let hooks = match self.preflight::<E>(&routing, EventOperation::Waterfall) {
+            Ok(hooks) => hooks,
+            Err(failure) => {
+                // The operation still owns the caller's tail if preflight
+                // fails. Keep the phase error and completion observation.
+                let logger = self.logger();
+                crate::contained::contain(
+                    "uncalled waterfall tail destruction",
+                    Some(&logger),
+                    || drop(tail),
+                );
+                return Err(failure);
+            }
+        };
         let tail = NextFn(Box::new(move |payload| {
             let args = *payload
                 .downcast::<E::Args>()
@@ -389,10 +402,26 @@ impl Context {
                             debug_assert_eq!(role, super::ListenerRole::Mapper);
                             match Context::invoke_plain(callback, payload)
                                 .await
-                                .map_err(|failure| failure.correlate(registration))?
+                                .map_err(|failure| failure.correlate(registration))
                             {
-                                CallbackValue::Mapper(mapped) => downstream.call(mapped).await,
-                                _ => unreachable!("Mapper adapter returns a mapped payload"),
+                                Ok(CallbackValue::Mapper(mapped)) => downstream.call(mapped).await,
+                                Ok(_) => unreachable!("Mapper adapter returns a mapped payload"),
+                                Err(mut failure) => {
+                                    // A failed Mapper leaves the continuation uncalled.
+                                    // Its last Drop may run a user tail destructor; keep
+                                    // the Mapper failure and complete the dispatch report.
+                                    if let Err(panic) =
+                                        std::panic::catch_unwind(AssertUnwindSafe(|| {
+                                            drop(downstream)
+                                        }))
+                                    {
+                                        failure.diagnostic.push_str(
+                                            "; uncalled waterfall continuation destruction panicked: ",
+                                        );
+                                        failure.diagnostic.push_str(&panic_message(panic));
+                                    }
+                                    Err(failure)
+                                }
                             }
                         }
                         HookKind::Around(callback) => {
