@@ -242,24 +242,41 @@ impl Context {
         Self::invoke_and_drop_callback(callback, |callback| callback(payload, next)).await
     }
 
+    fn drop_unclaimed_hooks(&self, hooks: impl IntoIterator<Item = HookSnap>) {
+        let logger = self.logger();
+        for hook in hooks {
+            crate::contained::contain(
+                "unclaimed event listener snapshot destruction",
+                Some(&logger),
+                || drop(hook),
+            );
+        }
+    }
+
     /// Deliver an ordered notification using explicit routing.
     async fn emit_inner<E>(&self, routing: Routing, args: E::Args) -> Result<(), DispatchError>
     where
         E: Event,
         E::Args: Clone,
     {
-        let hooks = self.preflight::<E>(&routing, EventOperation::Emit)?;
-        for hook in hooks {
+        let mut hooks = self
+            .preflight::<E>(&routing, EventOperation::Emit)?
+            .into_iter();
+        while let Some(hook) = hooks.next() {
             if !claim_hook(&self.root, E::NAME, &hook) {
+                self.drop_unclaimed_hooks(std::iter::once(hook));
                 continue;
             }
             let registration = hook.id;
             let HookKind::Plain { callback, .. } = hook.kind else {
                 unreachable!("preflight excludes Around from emit")
             };
-            Self::invoke_listener(callback, Box::new(args.clone()), registration)
-                .await
-                .map_err(DispatchError::Invocation)?;
+            if let Err(failure) =
+                Self::invoke_listener(callback, Box::new(args.clone()), registration).await
+            {
+                self.drop_unclaimed_hooks(hooks);
+                return Err(DispatchError::Invocation(failure));
+            }
         }
         Ok(())
     }
@@ -309,18 +326,26 @@ impl Context {
         E: Event,
         E::Args: Clone,
     {
-        let hooks = self.preflight::<E>(&routing, EventOperation::Query)?;
-        for hook in hooks {
+        let mut hooks = self
+            .preflight::<E>(&routing, EventOperation::Query)?
+            .into_iter();
+        while let Some(hook) = hooks.next() {
             if !claim_hook(&self.root, E::NAME, &hook) {
+                self.drop_unclaimed_hooks(std::iter::once(hook));
                 continue;
             }
             let registration = hook.id;
             let HookKind::Plain { callback, role } = hook.kind else {
                 unreachable!("preflight excludes Around from query")
             };
-            let value = Self::invoke_listener(callback, Box::new(args.clone()), registration)
-                .await
-                .map_err(DispatchError::Invocation)?;
+            let value =
+                match Self::invoke_listener(callback, Box::new(args.clone()), registration).await {
+                    Ok(value) => value,
+                    Err(failure) => {
+                        self.drop_unclaimed_hooks(hooks);
+                        return Err(DispatchError::Invocation(failure));
+                    }
+                };
             match (role, value) {
                 (super::ListenerRole::Observer, CallbackValue::Observer) => {}
                 (super::ListenerRole::Responder, CallbackValue::Responder(None)) => {}
@@ -328,6 +353,7 @@ impl Context {
                     let output = *output
                         .downcast::<E::Output>()
                         .expect("Event contract guarantees Responder output type");
+                    self.drop_unclaimed_hooks(hooks);
                     return Ok(QueryOutcome::Answer(output));
                 }
                 _ => unreachable!("semantic adapter role determines callback value"),
