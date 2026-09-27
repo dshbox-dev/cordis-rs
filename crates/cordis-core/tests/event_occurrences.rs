@@ -7,9 +7,11 @@ use cordis_core::event::{
     ListenerRegistrationError, around, mapper_sync, observer, observer_sync, responder_sync,
 };
 use cordis_core::{Context, Event, Plugin, PreparedPlugin, QueryOutcome, Routing};
+use futures::FutureExt;
 use parking_lot::Mutex;
 use std::borrow::Cow;
 use std::convert::Infallible;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -157,6 +159,109 @@ async fn once_is_consumed_before_callback_and_panic_never_restores_it() {
     assert!(
         !registration.remove(),
         "the winning once claim already unregistered the occurrence"
+    );
+}
+
+struct PanicOnLastCaptureDrop(Arc<AtomicUsize>);
+
+impl Drop for PanicOnLastCaptureDrop {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        panic!("once listener capture destroyed");
+    }
+}
+
+#[tokio::test]
+async fn parallel_once_listener_capture_destruction_does_not_skip_claimed_sibling() {
+    let ctx = Context::new();
+    let drops = Arc::new(AtomicUsize::new(0));
+    let later_hits = Arc::new(AtomicUsize::new(0));
+    let capture = PanicOnLastCaptureDrop(drops.clone());
+    let first = ctx
+        .on_with::<Ping, _>(
+            observer_sync(move |_, _| {
+                let _ = &capture;
+                Ok::<(), Infallible>(())
+            }),
+            ListenerOptions::default().once(),
+        )
+        .unwrap();
+    let hits = later_hits.clone();
+    let second = ctx
+        .on_with::<Ping, _>(
+            observer_sync(move |_, _| {
+                hits.fetch_add(1, Ordering::SeqCst);
+                Ok::<(), Infallible>(())
+            }),
+            ListenerOptions::default().once(),
+        )
+        .unwrap();
+
+    let dispatch = AssertUnwindSafe(ctx.emit_parallel::<Ping>(Routing::Unscoped, 1))
+        .catch_unwind()
+        .await;
+    assert!(
+        dispatch.is_ok(),
+        "capture Drop escaped dispatch containment"
+    );
+    let Err(DispatchError::Parallel(failures)) = dispatch.unwrap() else {
+        panic!("the first claimed listener's Drop should be reported");
+    };
+    assert_eq!(failures.failures().len(), 1);
+    assert_eq!(failures.failures()[0].kind(), InvocationFailureKind::Panic);
+    assert!(failures.failures()[0].registration_id().is_some());
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    assert_eq!(later_hits.load(Ordering::SeqCst), 1);
+    assert!(!first.remove());
+    assert!(!second.remove());
+    ctx.emit_parallel::<Ping>(Routing::Unscoped, 2)
+        .await
+        .unwrap();
+    assert_eq!(later_hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn once_around_capture_destruction_is_correlated_invocation_failure() {
+    let ctx = Context::new();
+    let drops = Arc::new(AtomicUsize::new(0));
+    let capture = PanicOnLastCaptureDrop(drops.clone());
+    let registration = ctx
+        .on_with::<Flow, _>(
+            around(
+                move |_, value: usize, next: cordis_core::event::Next<Flow>| {
+                    let _ = &capture;
+                    async move { next.call(value).await }
+                },
+            ),
+            ListenerOptions::default().once(),
+        )
+        .unwrap();
+
+    let dispatch = AssertUnwindSafe(ctx.waterfall::<Flow, _, _, _>(
+        Routing::Unscoped,
+        1,
+        |value| async move { Ok::<_, Infallible>(value + 1) },
+    ))
+    .catch_unwind()
+    .await;
+    assert!(
+        dispatch.is_ok(),
+        "around capture Drop escaped dispatch containment"
+    );
+    let Err(DispatchError::Invocation(failure)) = dispatch.unwrap() else {
+        panic!("the consumed around listener's Drop should be reported");
+    };
+    assert_eq!(failure.kind(), InvocationFailureKind::Panic);
+    assert!(failure.registration_id().is_some());
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    assert!(!registration.remove());
+    assert_eq!(
+        ctx.waterfall::<Flow, _, _, _>(Routing::Unscoped, 2, |value| async move {
+            Ok::<_, Infallible>(value + 1)
+        })
+        .await
+        .unwrap(),
+        3
     );
 }
 
