@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.3.26](https://github.com/dshbox/cordis-rs/compare/cordis-core-v0.3.25...cordis-core-v0.3.26) - 2026-09-27
+
+### Fixed
+
+- *(core)* contain skipped Event snapshots across dispatch modes
+- *(core)* contain unclaimed event snapshot drops on early exit
+
 ## [0.3.25](https://github.com/dshbox/cordis-rs/compare/cordis-core-v0.3.24...cordis-core-v0.3.25) - 2026-09-27
 
 ### Fixed
