@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.3.24](https://github.com/dshbox/cordis-rs/compare/cordis-core-v0.3.23...cordis-core-v0.3.24) - 2026-09-27
+
+### Other
+
+- *(core)* clarify Event callback destructor containment
+- Contain once listener callback destruction during dispatch
+
 ## [0.3.23](https://github.com/dshbox/cordis-rs/compare/cordis-core-v0.3.22...cordis-core-v0.3.23) - 2026-09-26
 
 ### Fixed
